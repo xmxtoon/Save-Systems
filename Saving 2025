@@ -1,0 +1,103 @@
+--!strict
+-- @xmx Saving 2025
+type GetSaveData = {
+	UserID:number
+}
+
+type GetSchema = {
+	Player:Player
+}
+
+export type SaveSchema = {
+	Get: (Player:Player) -> any,
+	SaveData: (UserID:number, Save:any) -> any
+}
+
+--[[=
+USAGE : 
+local Save = require(game.ServerScriptService.Modules.Save)
+
+(Wrap in a function/invoke with a player variable)
+
+Local Data = Save.Get(Player)
+
+if not Data then
+return false, "No Data"
+end
+Data.Test += 1
+
+save.SaveData(Player.UserId, Data) -- Must include this is any save function or else it wont save (also as a safe incase save on leave fails)
+
+=--]]
+
+
+local Save = {} :: SaveSchema
+
+local DatastoreService = game:GetService("DataStoreService")
+local SaveDatastore = DatastoreService:GetDataStore("Player Data")
+local Statss = require(script.Stats) :: {[string]: any} -- return {Test = 1, Starter = "", Bool = false)
+
+local SaveCache = {}
+
+function GetSaveData(UserID: number)
+	local key = string.format("Player_%s_Save", tostring(UserID))
+	local Data = SaveDatastore:GetAsync(key)
+
+	if type(Data) ~= "table" then
+		Data = {}
+	end
+
+	for statName, defaultValue in pairs(Statss) do
+		if Data[statName] == nil then
+			Data[statName] = defaultValue
+		end
+	end
+
+	return Data
+end
+
+Save.Get = function(Player:Player) 
+	local UserID = Player.UserId
+	if not Player or not UserID then
+		warn"[CRITICAL] Error Fetching Save!"
+		Player:Kick("[CRITICAL] Saving Failure, Please rejoin!")
+		return false
+	end
+	
+	if not SaveCache[UserID] then
+		SaveCache[UserID] = GetSaveData(UserID)
+		return SaveCache[UserID]
+	else
+		return SaveCache[UserID]
+	end
+end
+
+
+Save.SaveData = function(UserID, Save) : any
+	if not Save then
+		return false
+	end
+	
+	local Success = pcall(function()
+		SaveDatastore:SetAsync(string.format("Player_%s_Save", tostring(UserID)), Save)
+	end)
+	
+	if Success then
+		return true
+	else
+		return false, "Unknown Error"
+	end
+end
+
+game.Players.PlayerRemoving:Connect(function(player)
+	local UserID = player.UserId
+	if SaveCache[UserID] then
+		Save.SaveData(UserID, SaveCache[UserID])
+	end
+end)
+
+game.Players.PlayerAdded:Connect(function(player)
+	local Data = Save.Get(player) -- just initializing (for cache)
+end)
+
+return Save
