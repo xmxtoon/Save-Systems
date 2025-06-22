@@ -1,49 +1,62 @@
 --!strict
 -- @xmx Saving 2025
+
 type GetSaveData = {
-	UserID:number
+	UserID: number
 }
 
 type GetSchema = {
-	Player:Player
+	Player: Player
 }
 
 export type SaveSchema = {
-	Get: (Player:Player) -> any,
-	SaveData: (UserID:number, Save:any) -> any
+	Get: (Player: Player) -> any,
+	SaveData: (UserID: number, Save: any) -> any,
+	FlushAll: () -> ()
 }
-
---[[=
-USAGE : 
-local Save = require(game.ServerScriptService.Modules.Save)
-
-(Wrap in a function/invoke with a player variable)
-
-Local Data = Save.Get(Player)
-
-if not Data then
-return false, "No Data"
-end
-Data.Test += 1
-
-save.SaveData(Player.UserId, Data) -- Must include this is any save function or else it wont save (also as a safe incase save on leave fails)
-
-=--]]
-
 
 local Save = {} :: SaveSchema
 
 local DatastoreService = game:GetService("DataStoreService")
 local SaveDatastore = DatastoreService:GetDataStore("Player Data")
-local Statss = require(script.Stats) :: {[string]: any} -- return {Test = 1, Starter = "", Bool = false)
+local Statss = require(script.Stats) :: {[string]: any}
 
 local SaveCache = {}
 
-function GetSaveData(UserID: number)
-	local key = string.format("Player_%s_Save", tostring(UserID))
-	local Data = SaveDatastore:GetAsync(key)
+local function GetKey(UserID: number): string
+	return string.format("Player_%d_Save", UserID)
+end
 
-	if type(Data) ~= "table" then
+local function Retry(operation: () -> (), maxAttempts: number): (boolean, any?)
+	for attempt = 1, maxAttempts do
+		local results = { pcall(operation) }
+		local success = results[1]
+		local value = results[2]
+
+		if success then
+			return true, value
+		end
+
+		local errorMessage = tostring(value)
+		if string.find(errorMessage, "429") then
+			task.wait(math.min(2 ^ attempt, 10))
+		else
+			task.wait(0.5)
+		end
+	end
+
+	return false, nil
+end
+
+
+function GetSaveData(UserID: number)
+	local key = GetKey(UserID)
+	local Data 
+	local success, Data = Retry(function()
+		Data = SaveDatastore:GetAsync(key)
+	end, 3)
+
+	if not success or type(Data) ~= "table" then
 		Data = {}
 	end
 
@@ -56,36 +69,50 @@ function GetSaveData(UserID: number)
 	return Data
 end
 
-Save.Get = function(Player:Player) 
+Save.Get = function(Player: Player)
 	local UserID = Player.UserId
 	if not Player or not UserID then
-		warn"[CRITICAL] Error Fetching Save!"
 		Player:Kick("[CRITICAL] Saving Failure, Please rejoin!")
 		return false
 	end
-	
+
 	if not SaveCache[UserID] then
-		SaveCache[UserID] = GetSaveData(UserID)
-		return SaveCache[UserID]
-	else
-		return SaveCache[UserID]
+		local success, data = pcall(function()
+			return GetSaveData(UserID)
+		end)
+
+		if success and data then
+			SaveCache[UserID] = data
+		else
+			Player:Kick("[CRITICAL] Failed to load save data. Please try again.")
+			return false
+		end
 	end
+
+	return SaveCache[UserID]
 end
 
-
-Save.SaveData = function(UserID, Save) : any
+Save.SaveData = function(UserID, Save): any
 	if not Save then
 		return false
 	end
-	
-	local Success = pcall(function()
-		SaveDatastore:SetAsync(string.format("Player_%s_Save", tostring(UserID)), Save)
-	end)
-	
-	if Success then
+
+	local key = GetKey(UserID)
+
+	local success = Retry(function()
+		SaveDatastore:SetAsync(key, Save)
+	end, 3)
+
+	if success then
 		return true
 	else
 		return false, "Unknown Error"
+	end
+end
+
+Save.FlushAll = function()
+	for UserID, data in pairs(SaveCache) do
+		Save.SaveData(UserID, data)
 	end
 end
 
@@ -97,7 +124,11 @@ game.Players.PlayerRemoving:Connect(function(player)
 end)
 
 game.Players.PlayerAdded:Connect(function(player)
-	local Data = Save.Get(player) -- just initializing (for cache)
+	local _ = Save.Get(player)
+end)
+
+game:BindToClose(function()
+	Save.FlushAll()
 end)
 
 return Save
